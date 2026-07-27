@@ -19,7 +19,7 @@ jobs:
       - name: Build source archive
         run: ./scripts/package.sh
       - name: Upload source archive
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: glowbeat-source
           path: ../glowbeat-rs-*.zip
@@ -51,7 +51,7 @@ jobs:
             -exec cp {} dist/ \;
           test -n "$(find dist -maxdepth 1 -type f -print -quit)"
       - name: Upload native library
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: glowbeat-${{ matrix.artifact }}
           path: dist/*
