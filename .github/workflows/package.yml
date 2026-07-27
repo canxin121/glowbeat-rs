@@ -13,7 +13,7 @@ jobs:
   source-archive:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Build source archive
@@ -38,7 +38,7 @@ jobs:
             artifact: windows-x86_64
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.97.1
       - run: cargo build --release --all-features
       - name: Stage native libraries
