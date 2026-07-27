@@ -1,0 +1,180 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  format:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+      - run: cargo fmt --manifest-path adapters/cpal/Cargo.toml -- --check
+      - run: cargo fmt --manifest-path adapters/wasm/Cargo.toml -- --check
+
+  core-native:
+    name: Core (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: core-${{ matrix.os }}
+      - run: cargo clippy --lib --bins --examples --tests --all-features -- -D warnings
+      - run: cargo test --lib --bins --examples --tests --all-features
+      - run: cargo test --release --lib --bins --examples --tests --all-features
+      - run: cargo build --release --all-features
+
+  core-msrv:
+    name: Core MSRV 1.85
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: msrv
+      - run: cargo check --all-targets --no-default-features
+      - run: cargo test --lib --no-default-features
+
+  c-header:
+    name: C and C++ ABI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile C consumer
+        run: >-
+          cc -std=c11 -Wall -Wextra -Werror -pedantic -Iinclude
+          -c examples/c_api_smoke.c -o /tmp/glowbeat_c_api_smoke.o
+      - name: Compile and execute C++ ABI assertions
+        run: >-
+          c++ -std=c++17 -Wall -Wextra -Werror -pedantic -Iinclude
+          tests/ffi_layout.cpp -o /tmp/glowbeat_ffi_layout &&
+          /tmp/glowbeat_ffi_layout
+
+  cpal-adapter:
+    name: CPAL adapter (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ALSA development files
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: adapters/cpal
+          shared-key: cpal-${{ matrix.os }}
+      - run: cargo clippy --manifest-path adapters/cpal/Cargo.toml --all-targets -- -D warnings
+      - run: cargo build --release --manifest-path adapters/cpal/Cargo.toml
+
+  wasm-adapter:
+    name: WebAssembly adapter
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: adapters/wasm
+          shared-key: wasm-adapter
+      - run: cargo build --release --target wasm32-unknown-unknown --manifest-path adapters/wasm/Cargo.toml
+
+  portable-core-targets:
+    name: Portable core (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: wasm32-unknown-unknown
+          - os: ubuntu-latest
+            target: aarch64-linux-android
+          - os: macos-latest
+            target: aarch64-apple-ios
+          - os: macos-latest
+            target: aarch64-apple-ios-sim
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: target-${{ matrix.target }}
+      - run: cargo check --release --target ${{ matrix.target }} --no-default-features
+
+  bindings:
+    name: Swift and C# bindings
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Type-check Swift wrapper
+        run: swiftc -typecheck -Xcc -fmodule-map-file=bindings/swift/module.modulemap bindings/swift/GlowBeat.swift
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Build C# wrapper
+        run: dotnet build bindings/csharp/GlowBeat.csproj -c Release
+
+  static-sanity:
+    name: Static and asset validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 scripts/static_sanity.py
+      - run: python3 scripts/validate_assets.py
+      - run: python3 scripts/validate_protocol.py
+      - run: python3 scripts/validate_links.py
+      - run: python3 -m py_compile scripts/*.py
+      - run: node --check adapters/wasm/web/example.js
+      - run: bash -n scripts/*.sh bindings/android/build-android.sh
+
+  performance-smoke:
+    name: Release performance smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: performance
+      - name: Run deterministic 1024-light benchmark
+        env:
+          GLOWBEAT_MIN_REALTIME_FACTOR: '1.25'
+        run: cargo bench --bench realtime | tee benchmark.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: realtime-benchmark-${{ github.sha }}
+          path: benchmark.txt
+          if-no-files-found: error
+          retention-days: 30

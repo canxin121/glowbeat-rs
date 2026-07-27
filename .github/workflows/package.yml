@@ -1,0 +1,58 @@
+name: package
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  source-archive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Build source archive
+        run: ./scripts/package.sh
+      - name: Upload source archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: glowbeat-source
+          path: ../glowbeat-rs-*.zip
+          if-no-files-found: error
+
+  native-library:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: linux-x86_64
+          - os: macos-latest
+            artifact: macos-runner-native
+          - os: windows-latest
+            artifact: windows-x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - run: cargo build --release --all-features
+      - name: Stage native libraries
+        shell: bash
+        run: |
+          mkdir -p dist
+          find target/release -maxdepth 1 -type f \
+            \( -name 'libglowbeat.a' -o -name 'libglowbeat.so' -o -name 'libglowbeat.dylib' \
+               -o -name 'glowbeat.dll' -o -name 'glowbeat.dll.lib' -o -name 'glowbeat.lib' \) \
+            -exec cp {} dist/ \;
+          test -n "$(find dist -maxdepth 1 -type f -print -quit)"
+      - name: Upload native library
+        uses: actions/upload-artifact@v4
+        with:
+          name: glowbeat-${{ matrix.artifact }}
+          path: dist/*
+          if-no-files-found: error

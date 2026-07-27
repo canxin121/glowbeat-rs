@@ -1,0 +1,48 @@
+[package]
+name = "glowbeat"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Cross-platform, low-latency music-to-RGBA light engine for streaming and full-track playback"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/canxin121/glowbeat-rs"
+homepage = "https://github.com/canxin121/glowbeat-rs"
+documentation = "https://docs.rs/glowbeat"
+readme = "README.md"
+keywords = ["audio", "music", "lighting", "dsp", "rgba"]
+categories = ["multimedia::audio", "algorithms"]
+autobins = false
+
+[lib]
+name = "glowbeat"
+crate-type = ["rlib", "cdylib", "staticlib"]
+
+[[bin]]
+name = "glowbeat"
+path = "src/bin/glowbeat.rs"
+
+[features]
+default = ["ffi"]
+ffi = []
+android-jni = ["dep:jni"]
+
+[dependencies]
+jni = { version = "0.22.4", optional = true, default-features = false }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+
+[profile.bench]
+inherits = "release"
+debug = true
+
+[workspace]
+members = ["."]
+exclude = ["adapters/cpal", "adapters/wasm"]
+
+[[bench]]
+name = "realtime"
+harness = false

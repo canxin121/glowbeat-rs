@@ -1,0 +1,30 @@
+[package]
+name = "glowbeat-native"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Native low-latency CPAL adapter for GlowBeat"
+license = "MIT OR Apache-2.0"
+publish = false
+autobins = false
+
+[lib]
+name = "glowbeat_native"
+path = "src/lib.rs"
+
+[[bin]]
+name = "glowbeat-native"
+path = "src/bin/glowbeat-native.rs"
+
+[dependencies]
+glowbeat = { path = "../..", default-features = false }
+cpal = "0.18.1"
+rtrb = "0.3.4"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+[workspace]

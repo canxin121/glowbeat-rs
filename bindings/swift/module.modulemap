@@ -1,0 +1,4 @@
+module GlowBeatNative {
+    header "../../include/glowbeat.h"
+    export *
+}

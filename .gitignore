@@ -1,0 +1,12 @@
+/target
+/adapters/*/target
+*.gbs
+*.csv
+*.wav
+!assets/layout_64.csv
+!assets/demo_124bpm.wav
+__pycache__/
+*.py[cod]
+.DS_Store
+.idea/
+.vscode/
