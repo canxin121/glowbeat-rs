@@ -91,7 +91,11 @@ fn command_live(mut args: VecDeque<String>) -> Result<(), Box<dyn Error + Send +
         .max_frequency_hz
         .min(config.analysis.sample_rate as f32 * 0.48);
     config.render.frames_per_second = fps;
-    config.render.output_mode = if amber { OutputMode::Amber } else { OutputMode::Alpha };
+    config.render.output_mode = if amber {
+        OutputMode::Amber
+    } else {
+        OutputMode::Alpha
+    };
     let mut engine = StreamingEngine::new(config, points.len())?;
     // The renderer and packet encoder both retain the layout for the lifetime of
     // the live session. This one-time clone stays outside the realtime loop.
@@ -181,11 +185,8 @@ fn command_play(mut args: VecDeque<String>) -> Result<(), Box<dyn Error + Send +
 
     let wav = read_wav(&input)?;
     let source_channels = wav.channels as usize;
-    let format = preferred_output_format(
-        output_device.as_deref(),
-        wav.sample_rate,
-        source_channels,
-    )?;
+    let format =
+        preferred_output_format(output_device.as_deref(), wav.sample_rate, source_channels)?;
     let channel_converted = convert_channels(&wav.samples, source_channels, format.channels);
     let pcm = resample_linear(
         &channel_converted,
@@ -254,7 +255,9 @@ fn command_play(mut args: VecDeque<String>) -> Result<(), Box<dyn Error + Send +
         let audible = playback.audible_frame().min(total_frames);
         if audible as f64 >= next_render {
             player.render(audible, &points, &mut colors)?;
-            let frame = active_frame(player.score(), audible).cloned().unwrap_or_default();
+            let frame = active_frame(player.score(), audible)
+                .cloned()
+                .unwrap_or_default();
             sender.send(audible, &frame, &colors)?;
             while next_render <= audible as f64 {
                 next_render += render_step;
@@ -302,7 +305,11 @@ impl PacketSender {
         lead_ms: u64,
         amber: bool,
     ) -> Result<Self, Box<dyn Error + Send + Sync>> {
-        let bind_address = if target.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" };
+        let bind_address = if target.is_ipv6() {
+            "[::]:0"
+        } else {
+            "0.0.0.0:0"
+        };
         let socket = UdpSocket::bind(bind_address)?;
         socket.set_nonblocking(false)?;
         Ok(Self {
@@ -333,7 +340,10 @@ impl PacketSender {
             self.points
                 .iter()
                 .zip(colors)
-                .map(|(point, rgba)| WireLight { id: point.id, rgba: *rgba }),
+                .map(|(point, rgba)| WireLight {
+                    id: point.id,
+                    rgba: *rgba,
+                }),
         );
         let mut packet_flags = 0_u8;
         let new_music_frame = self.last_music_sample != Some(frame.sample_index);
@@ -428,7 +438,11 @@ fn ensure_empty(args: &VecDeque<String>) -> Result<(), Box<dyn Error + Send + Sy
     if args.is_empty() {
         Ok(())
     } else {
-        Err(format!("unexpected arguments: {}", args.iter().cloned().collect::<Vec<_>>().join(" ")).into())
+        Err(format!(
+            "unexpected arguments: {}",
+            args.iter().cloned().collect::<Vec<_>>().join(" ")
+        )
+        .into())
     }
 }
 

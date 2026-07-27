@@ -80,14 +80,24 @@ pub fn select_device(selector: Option<&str>, input: bool) -> NativeResult<Device
                 return Ok(device);
             }
         }
-        return Err(format!("no {} device matched '{selector}'", if input { "input" } else { "output" }).into());
+        return Err(format!(
+            "no {} device matched '{selector}'",
+            if input { "input" } else { "output" }
+        )
+        .into());
     }
     let device = if input {
         host.default_input_device()
     } else {
         host.default_output_device()
     };
-    device.ok_or_else(|| format!("no default {} device", if input { "input" } else { "output" }).into())
+    device.ok_or_else(|| {
+        format!(
+            "no default {} device",
+            if input { "input" } else { "output" }
+        )
+        .into()
+    })
 }
 
 /// Resolves a native output format close to the requested PCM layout.
@@ -145,12 +155,11 @@ impl CaptureStream {
         let sample_rate = supported.sample_rate();
         let channels = supported.channels() as usize;
         let mut config = supported.config();
-        config.buffer_size = requested_buffer_size(supported.buffer_size(), requested_buffer_frames);
-        let queue_samples = ((sample_rate as u64
-            * channels as u64
-            * queue_milliseconds.max(20) as u64)
-            / 1_000)
-            .clamp(4_096, 16_777_216) as usize;
+        config.buffer_size =
+            requested_buffer_size(supported.buffer_size(), requested_buffer_frames);
+        let queue_samples =
+            ((sample_rate as u64 * channels as u64 * queue_milliseconds.max(20) as u64) / 1_000)
+                .clamp(4_096, 16_777_216) as usize;
         let (producer, consumer) = RingBuffer::new(queue_samples);
         let dropped_samples = Arc::new(AtomicU64::new(0));
         let failed = Arc::new(AtomicBool::new(false));
@@ -161,18 +170,90 @@ impl CaptureStream {
             eprintln!("GlowBeat input stream error: {error}");
         };
         let stream = match sample_format {
-            SampleFormat::I8 => build_input::<i8, _>(&device, config, producer, dropped_for_callback, error_callback)?,
-            SampleFormat::I16 => build_input::<i16, _>(&device, config, producer, dropped_for_callback, error_callback)?,
-            SampleFormat::I24 => build_input::<I24, _>(&device, config, producer, dropped_for_callback, error_callback)?,
-            SampleFormat::U24 => build_input::<U24, _>(&device, config, producer, dropped_for_callback, error_callback)?,
-            SampleFormat::I32 => build_input::<i32, _>(&device, config, producer, dropped_for_callback, error_callback)?,
-            SampleFormat::I64 => build_input::<i64, _>(&device, config, producer, dropped_for_callback, error_callback)?,
-            SampleFormat::U8 => build_input::<u8, _>(&device, config, producer, dropped_for_callback, error_callback)?,
-            SampleFormat::U16 => build_input::<u16, _>(&device, config, producer, dropped_for_callback, error_callback)?,
-            SampleFormat::U32 => build_input::<u32, _>(&device, config, producer, dropped_for_callback, error_callback)?,
-            SampleFormat::U64 => build_input::<u64, _>(&device, config, producer, dropped_for_callback, error_callback)?,
-            SampleFormat::F32 => build_input::<f32, _>(&device, config, producer, dropped_for_callback, error_callback)?,
-            SampleFormat::F64 => build_input::<f64, _>(&device, config, producer, dropped_for_callback, error_callback)?,
+            SampleFormat::I8 => build_input::<i8, _>(
+                &device,
+                config,
+                producer,
+                dropped_for_callback,
+                error_callback,
+            )?,
+            SampleFormat::I16 => build_input::<i16, _>(
+                &device,
+                config,
+                producer,
+                dropped_for_callback,
+                error_callback,
+            )?,
+            SampleFormat::I24 => build_input::<I24, _>(
+                &device,
+                config,
+                producer,
+                dropped_for_callback,
+                error_callback,
+            )?,
+            SampleFormat::U24 => build_input::<U24, _>(
+                &device,
+                config,
+                producer,
+                dropped_for_callback,
+                error_callback,
+            )?,
+            SampleFormat::I32 => build_input::<i32, _>(
+                &device,
+                config,
+                producer,
+                dropped_for_callback,
+                error_callback,
+            )?,
+            SampleFormat::I64 => build_input::<i64, _>(
+                &device,
+                config,
+                producer,
+                dropped_for_callback,
+                error_callback,
+            )?,
+            SampleFormat::U8 => build_input::<u8, _>(
+                &device,
+                config,
+                producer,
+                dropped_for_callback,
+                error_callback,
+            )?,
+            SampleFormat::U16 => build_input::<u16, _>(
+                &device,
+                config,
+                producer,
+                dropped_for_callback,
+                error_callback,
+            )?,
+            SampleFormat::U32 => build_input::<u32, _>(
+                &device,
+                config,
+                producer,
+                dropped_for_callback,
+                error_callback,
+            )?,
+            SampleFormat::U64 => build_input::<u64, _>(
+                &device,
+                config,
+                producer,
+                dropped_for_callback,
+                error_callback,
+            )?,
+            SampleFormat::F32 => build_input::<f32, _>(
+                &device,
+                config,
+                producer,
+                dropped_for_callback,
+                error_callback,
+            )?,
+            SampleFormat::F64 => build_input::<f64, _>(
+                &device,
+                config,
+                producer,
+                dropped_for_callback,
+                error_callback,
+            )?,
             other => return Err(format!("unsupported input sample format {other}").into()),
         };
         stream.play()?;
@@ -329,7 +410,8 @@ impl PlaybackStream {
         let supported = choose_output_config(&device, sample_rate, channels)?;
         let format = supported.sample_format();
         let mut config = supported.config();
-        let selected_buffer = requested_buffer_size(supported.buffer_size(), requested_buffer_frames);
+        let selected_buffer =
+            requested_buffer_size(supported.buffer_size(), requested_buffer_frames);
         let effective_buffer_frames = match selected_buffer {
             BufferSize::Fixed(frames) => frames,
             BufferSize::Default => requested_buffer_frames,
@@ -350,18 +432,42 @@ impl PlaybackStream {
             eprintln!("GlowBeat output stream error: {error}");
         };
         let stream = match format {
-            SampleFormat::I8 => build_output::<i8, _>(&device, config, pcm, clock.clone(), error_callback)?,
-            SampleFormat::I16 => build_output::<i16, _>(&device, config, pcm, clock.clone(), error_callback)?,
-            SampleFormat::I24 => build_output::<I24, _>(&device, config, pcm, clock.clone(), error_callback)?,
-            SampleFormat::U24 => build_output::<U24, _>(&device, config, pcm, clock.clone(), error_callback)?,
-            SampleFormat::I32 => build_output::<i32, _>(&device, config, pcm, clock.clone(), error_callback)?,
-            SampleFormat::I64 => build_output::<i64, _>(&device, config, pcm, clock.clone(), error_callback)?,
-            SampleFormat::U8 => build_output::<u8, _>(&device, config, pcm, clock.clone(), error_callback)?,
-            SampleFormat::U16 => build_output::<u16, _>(&device, config, pcm, clock.clone(), error_callback)?,
-            SampleFormat::U32 => build_output::<u32, _>(&device, config, pcm, clock.clone(), error_callback)?,
-            SampleFormat::U64 => build_output::<u64, _>(&device, config, pcm, clock.clone(), error_callback)?,
-            SampleFormat::F32 => build_output::<f32, _>(&device, config, pcm, clock.clone(), error_callback)?,
-            SampleFormat::F64 => build_output::<f64, _>(&device, config, pcm, clock.clone(), error_callback)?,
+            SampleFormat::I8 => {
+                build_output::<i8, _>(&device, config, pcm, clock.clone(), error_callback)?
+            }
+            SampleFormat::I16 => {
+                build_output::<i16, _>(&device, config, pcm, clock.clone(), error_callback)?
+            }
+            SampleFormat::I24 => {
+                build_output::<I24, _>(&device, config, pcm, clock.clone(), error_callback)?
+            }
+            SampleFormat::U24 => {
+                build_output::<U24, _>(&device, config, pcm, clock.clone(), error_callback)?
+            }
+            SampleFormat::I32 => {
+                build_output::<i32, _>(&device, config, pcm, clock.clone(), error_callback)?
+            }
+            SampleFormat::I64 => {
+                build_output::<i64, _>(&device, config, pcm, clock.clone(), error_callback)?
+            }
+            SampleFormat::U8 => {
+                build_output::<u8, _>(&device, config, pcm, clock.clone(), error_callback)?
+            }
+            SampleFormat::U16 => {
+                build_output::<u16, _>(&device, config, pcm, clock.clone(), error_callback)?
+            }
+            SampleFormat::U32 => {
+                build_output::<u32, _>(&device, config, pcm, clock.clone(), error_callback)?
+            }
+            SampleFormat::U64 => {
+                build_output::<u64, _>(&device, config, pcm, clock.clone(), error_callback)?
+            }
+            SampleFormat::F32 => {
+                build_output::<f32, _>(&device, config, pcm, clock.clone(), error_callback)?
+            }
+            SampleFormat::F64 => {
+                build_output::<f64, _>(&device, config, pcm, clock.clone(), error_callback)?
+            }
             other => return Err(format!("unsupported output sample format {other}").into()),
         };
         stream.play()?;
@@ -446,7 +552,6 @@ where
     Ok(stream)
 }
 
-
 /// Converts an interleaved PCM buffer to a new channel count.
 ///
 /// Mono conversion averages all source channels. Expansion preserves the first
@@ -473,7 +578,8 @@ pub fn convert_channels(input: &[f32], source_channels: usize, target_channels: 
             }
         } else {
             for channel in 0..target_channels {
-                output[frame * target_channels + channel] = source[channel.min(source_channels - 1)];
+                output[frame * target_channels + channel] =
+                    source[channel.min(source_channels - 1)];
             }
         }
     }
