@@ -1,6 +1,6 @@
 //! Multi-band causal spectrum analysis.
 
-use crate::math::{hann_window, Complex32, FftPlan};
+use crate::math::{hann_window, smoothing_alpha, Complex32, FftPlan};
 use crate::types::NUM_BANDS;
 
 #[derive(Clone, Copy, Debug)]
@@ -45,6 +45,9 @@ pub struct SpectrumAnalyzer {
     bin_map: Vec<Option<BinMap>>,
     band_peak: [f32; NUM_BANDS],
     smoothed_bands: [f32; NUM_BANDS],
+    peak_decay: f32,
+    band_attack: f32,
+    band_release: f32,
 }
 
 impl SpectrumAnalyzer {
@@ -53,6 +56,25 @@ impl SpectrumAnalyzer {
     pub fn new(
         sample_rate: u32,
         fft_size: usize,
+        min_frequency_hz: f32,
+        max_frequency_hz: f32,
+    ) -> Self {
+        let default_hop = (fft_size / 4).max(1);
+        Self::new_with_hop(
+            sample_rate,
+            fft_size,
+            default_hop,
+            min_frequency_hz,
+            max_frequency_hz,
+        )
+    }
+
+    /// Creates an analyzer with smoothing normalized to the supplied hop size.
+    #[must_use]
+    pub fn new_with_hop(
+        sample_rate: u32,
+        fft_size: usize,
+        hop_size: usize,
         min_frequency_hz: f32,
         max_frequency_hz: f32,
     ) -> Self {
@@ -92,6 +114,9 @@ impl SpectrumAnalyzer {
             bin_map,
             band_peak: [0.08; NUM_BANDS],
             smoothed_bands: [0.0; NUM_BANDS],
+            peak_decay: (-(hop_size as f32 / sample_rate.max(1) as f32) / 7.0).exp(),
+            band_attack: smoothing_alpha(hop_size as f32 / sample_rate.max(1) as f32, 0.010),
+            band_release: smoothing_alpha(hop_size as f32 / sample_rate.max(1) as f32, 0.065),
         }
     }
 
@@ -140,20 +165,18 @@ impl SpectrumAnalyzer {
             centroid_denominator += perceptual;
         }
 
-        let hop_attack = 0.55;
-        let hop_release = 0.14;
         for ((energy, peak), smoothed) in band_energy
             .iter()
             .zip(&mut self.band_peak)
             .zip(&mut self.smoothed_bands)
         {
             let compressed = ((1.0 + 18.0 * energy).ln() / 19.0_f32.ln()).clamp(0.0, 4.0);
-            *peak = (*peak * 0.9992).max(compressed);
+            *peak = (*peak * self.peak_decay).max(compressed);
             let normalized = (compressed / (*peak + 0.04)).clamp(0.0, 1.35);
             let coefficient = if normalized > *smoothed {
-                hop_attack
+                self.band_attack
             } else {
-                hop_release
+                self.band_release
             };
             *smoothed += coefficient * (normalized - *smoothed);
         }

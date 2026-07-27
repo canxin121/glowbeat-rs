@@ -156,7 +156,10 @@ pub struct RenderConfig {
     pub accent_strength: f32,
     /// Strength of deterministic per-light spatial variation.
     pub spatial_strength: f32,
-    /// Limits abrupt full-field luminance changes. `1.0` effectively disables it.
+    /// Maximum 120-Hz-reference-frame step in the transmitted/output domain.
+    /// The renderer scales this by the actual sample-clock delta and applies it
+    /// to both perceived luminance and channel color distance. `1.0` disables
+    /// temporal limiting.
     pub max_luma_step: f32,
 }
 
@@ -164,21 +167,48 @@ impl Default for RenderConfig {
     fn default() -> Self {
         Self {
             frames_per_second: 120.0,
-            max_brightness: 0.92,
+            max_brightness: 0.88,
             output_gamma: 2.2,
             output_mode: OutputMode::Alpha,
             amber_mix: 0.65,
             hue_offset: 0.0,
             saturation: 1.0,
-            beat_strength: 1.0,
-            accent_strength: 1.0,
-            spatial_strength: 0.75,
-            max_luma_step: 0.85,
+            beat_strength: 0.78,
+            accent_strength: 0.82,
+            spatial_strength: 0.62,
+            max_luma_step: 0.055,
         }
     }
 }
 
 impl RenderConfig {
+    /// Returns a low-fatigue profile for close viewing and long sessions.
+    #[must_use]
+    pub fn comfort() -> Self {
+        Self {
+            max_brightness: 0.78,
+            beat_strength: 0.62,
+            accent_strength: 0.64,
+            spatial_strength: 0.42,
+            max_luma_step: 0.035,
+            ..Self::default()
+        }
+    }
+
+    /// Returns a higher-impact profile that retains confidence gating and
+    /// anti-flicker limiting. It is suitable for large rooms and stage use.
+    #[must_use]
+    pub fn energetic() -> Self {
+        Self {
+            max_brightness: 0.94,
+            beat_strength: 0.94,
+            accent_strength: 1.00,
+            spatial_strength: 0.76,
+            max_luma_step: 0.075,
+            ..Self::default()
+        }
+    }
+
     /// Validates renderer settings.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if ![

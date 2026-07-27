@@ -22,6 +22,10 @@ pub struct OnsetFrame {
 }
 
 /// Robust adaptive onset detector with separate frequency lanes.
+///
+/// The detector uses hysteresis, lane-specific refractory periods, and robust
+/// median/MAD thresholds. This deliberately prefers one musically useful event
+/// over several rapid threshold crossings from the same drum or vocal attack.
 #[derive(Clone, Debug)]
 pub struct OnsetDetector {
     previous: [f32; NUM_BANDS],
@@ -32,7 +36,7 @@ pub struct OnsetDetector {
     spreads: [f32; LANES],
     above: [bool; LANES],
     refractory: [usize; LANES],
-    refractory_frames: usize,
+    refractory_frames: [usize; LANES],
     update_counter: usize,
     scratch: [f32; HISTORY],
 }
@@ -41,16 +45,18 @@ impl OnsetDetector {
     /// Creates a detector for a given hop duration.
     #[must_use]
     pub fn new(hop_seconds: f32) -> Self {
+        let frames = |seconds: f32| (seconds / hop_seconds.max(1.0e-6)).ceil().max(1.0) as usize;
         Self {
             previous: [0.0; NUM_BANDS],
             history: [[0.0; LANES]; HISTORY],
             history_write: 0,
             history_count: 0,
-            thresholds: [0.012; LANES],
-            spreads: [0.008; LANES],
+            thresholds: [0.014, 0.013, 0.012, 0.013],
+            spreads: [0.010, 0.009, 0.009, 0.010],
             above: [false; LANES],
             refractory: [usize::MAX / 2; LANES],
-            refractory_frames: (0.075 / hop_seconds).ceil().max(1.0) as usize,
+            // Kick/broadband impacts need longer de-duplication than hats.
+            refractory_frames: [frames(0.110), frames(0.095), frames(0.070), frames(0.135)],
             update_counter: 0,
             scratch: [0.0; HISTORY],
         }
@@ -67,40 +73,61 @@ impl OnsetDetector {
         let low = weighted_mean(&positive[0..7]);
         let mid = weighted_mean(&positive[7..16]);
         let high = weighted_mean(&positive[16..24]);
-        let impact = 0.45 * low + 0.35 * mid + 0.20 * high;
+        let impact = 0.46 * low + 0.35 * mid + 0.19 * high;
         let raw = [low, mid, high, impact];
 
         self.history[self.history_write] = raw;
         self.history_write = (self.history_write + 1) % HISTORY;
         self.history_count = (self.history_count + 1).min(HISTORY);
         self.update_counter += 1;
-        if self.update_counter >= 4 && self.history_count >= 16 {
+        if self.update_counter >= 4 && self.history_count >= 20 {
             self.update_counter = 0;
             for lane in 0..LANES {
                 let (median, mad) = self.median_and_mad(lane);
-                self.thresholds[lane] = (median + 2.8 * mad + 0.0025).max(0.004);
-                self.spreads[lane] = (5.0 * mad + 0.006).max(0.008);
+                self.thresholds[lane] = (median + 3.25 * mad + 0.0032).max(0.005);
+                self.spreads[lane] = (5.8 * mad + 0.0065).max(0.0085);
             }
         }
 
         let mut pulse = [0.0_f32; LANES];
         for lane in 0..LANES {
             self.refractory[lane] = self.refractory[lane].saturating_add(1);
-            let is_above = raw[lane] > self.thresholds[lane];
-            let strength = smoothstep(
-                self.thresholds[lane],
-                self.thresholds[lane] + self.spreads[lane],
-                raw[lane],
-            );
-            if is_above && !self.above[lane] && self.refractory[lane] >= self.refractory_frames {
+            let threshold = self.thresholds[lane];
+            // Once open, use a lower release threshold. This prevents a noisy
+            // spectral ridge from repeatedly crossing the same boundary.
+            let is_above = if self.above[lane] {
+                raw[lane] > threshold * 0.72
+            } else {
+                raw[lane] > threshold
+            };
+            let strength = smoothstep(threshold, threshold + self.spreads[lane], raw[lane]);
+            if is_above
+                && !self.above[lane]
+                && strength > 0.08
+                && self.refractory[lane] >= self.refractory_frames[lane]
+            {
                 pulse[lane] = strength;
                 self.refractory[lane] = 0;
             }
             self.above[lane] = is_above;
         }
 
-        if pulse[3] == 0.0 {
-            pulse[3] = (0.65 * pulse[0] + 0.55 * pulse[1] + 0.35 * pulse[2]).clamp(0.0, 1.0);
+        // A broadband accent should not automatically double every isolated
+        // kick/hat in the renderer. A separately detected impact is attenuated
+        // when only one spectral lane fired; synthesized impacts require a strong
+        // or genuinely multi-lane attack.
+        let active_lanes =
+            (pulse[0] > 0.0) as usize + (pulse[1] > 0.0) as usize + (pulse[2] > 0.0) as usize;
+        let combined = (0.58 * pulse[0] + 0.50 * pulse[1] + 0.30 * pulse[2]).clamp(0.0, 1.0);
+        if pulse[3] > 0.0 {
+            pulse[3] *= match active_lanes {
+                0 => 0.42,
+                1 => 0.34,
+                2 => 0.68,
+                _ => 0.82,
+            };
+        } else if active_lanes >= 2 || combined > 0.72 {
+            pulse[3] = combined * 0.58;
         }
 
         OnsetFrame {
@@ -109,7 +136,7 @@ impl OnsetDetector {
             high: pulse[2],
             impact: pulse[3],
             flux: smoothstep(
-                self.thresholds[3] * 0.55,
+                self.thresholds[3] * 0.60,
                 self.thresholds[3] + self.spreads[3],
                 raw[3],
             ),

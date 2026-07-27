@@ -40,7 +40,7 @@ typedef struct GlowbeatFfiConfig {
     float beat_strength;
     float accent_strength;
     float spatial_strength;
-    float max_luma_step;
+    float max_luma_step; /* output-domain anti-flicker step; 1.0 disables */
 } GlowbeatFfiConfig;
 
 typedef struct GlowbeatFfiReport {

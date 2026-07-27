@@ -25,11 +25,11 @@ pub const MAX_LIGHTS_PER_PACKET: usize = (MAX_UDP_PAYLOAD - HEADER_BYTES - CRC_B
 
 /// Header flags.
 pub mod flags {
-    /// Current frame is on a beat.
+    /// A new beat event is attached to this rendered frame.
     pub const BEAT: u8 = 1 << 0;
-    /// Current frame is on a downbeat.
+    /// A new downbeat event is attached to this rendered frame.
     pub const DOWNBEAT: u8 = 1 << 1;
-    /// A confirmed release/drop is active.
+    /// A new confirmed release/drop event is attached to this rendered frame.
     pub const DROP: u8 = 1 << 2;
     /// The fourth channel is physical amber instead of alpha.
     pub const AMBER: u8 = 1 << 3;

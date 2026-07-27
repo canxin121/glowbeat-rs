@@ -1,12 +1,11 @@
-//! High-level causal music-to-light API for a single live RGB fixture.
+//! High-level causal music-to-light API for a single live RGBA fixture.
 //!
 //! [`LiveEngine`] is the complete real-time path for sources whose future is
-//! unknown, including microphone and Android playback-capture audio. It owns
-//! the causal DSP, musical interpretation, style rendering, sensitivity, and
-//! compact low/mid/high metrics used by a user interface. Platform code only
-//! supplies PCM and transports the resulting color.
+//! unknown, including microphones and playback-capture audio. Platform code
+//! supplies mono PCM and transports the resulting color.
 
 use crate::config::{ConfigError, EngineConfig};
+use crate::math::{smoothing_alpha, wrap01};
 use crate::streaming::StreamingEngine;
 use crate::types::{LightPoint, Rgba};
 
@@ -75,17 +74,17 @@ pub struct LiveMetrics {
     pub peak: f32,
     /// Perceptual loudness proxy in `[0, 1]`.
     pub loudness: f32,
-    /// Low-frequency energy derived from GlowBeat's logarithmic filterbank.
+    /// Low-frequency energy derived from the logarithmic filterbank.
     pub low: f32,
-    /// Mid-frequency energy derived from GlowBeat's logarithmic filterbank.
+    /// Mid-frequency energy derived from the logarithmic filterbank.
     pub mid: f32,
-    /// High-frequency energy derived from GlowBeat's logarithmic filterbank.
+    /// High-frequency energy derived from the logarithmic filterbank.
     pub high: f32,
     /// Broadband positive spectral flux.
     pub spectral_flux: f32,
     /// Strongest transient impact observed in this input block.
     pub impact: f32,
-    /// True when a beat occurred in this input block.
+    /// True when a confident beat occurred in this input block.
     pub beat_event: bool,
     /// Estimated tempo in beats per minute.
     pub bpm: f32,
@@ -105,19 +104,19 @@ pub struct LiveFrame {
 }
 
 /// Allocation-stable one-fixture live music-to-light engine.
-///
-/// The engine accepts mono PCM because platform adapters should downmix before
-/// crossing their FFI boundary. It owns no platform I/O and performs no heap
-/// allocation after construction for normal input blocks.
 #[derive(Clone, Debug)]
 pub struct LiveEngine {
     engine: StreamingEngine,
     point: [LightPoint; 1],
     color: [Rgba; 1],
+    styled_color: Rgba,
+    style_phase: f32,
+    smoothed_style_loudness: f32,
+    last_style_sample: Option<u64>,
 }
 
 impl LiveEngine {
-    /// Creates an Android-friendly live engine for normalized mono PCM.
+    /// Creates a live engine for normalized mono PCM.
     pub fn new_mono(sample_rate: u32) -> Result<Self, ConfigError> {
         let mut config = EngineConfig::default();
         config.analysis.sample_rate = sample_rate;
@@ -127,7 +126,7 @@ impl LiveEngine {
             .max_frequency_hz
             .min(sample_rate as f32 * 0.48);
         config.render.frames_per_second = 100.0;
-        // A physical stick receives one shared RGB value, not a spatial pixel layout.
+        // A physical stick receives one shared RGB value, not a spatial layout.
         config.render.spatial_strength = 0.0;
         Self::with_config(config)
     }
@@ -141,6 +140,10 @@ impl LiveEngine {
             engine: StreamingEngine::new(config, 1)?,
             point: [LightPoint::new(0, 0.0, 0.0, 0.0, 0.5)],
             color: [Rgba::default()],
+            styled_color: Rgba::default(),
+            style_phase: 0.0,
+            smoothed_style_loudness: 0.0,
+            last_style_sample: None,
         })
     }
 
@@ -155,26 +158,53 @@ impl LiveEngine {
         let mut beat_event = false;
         let mut strongest_impact = 0.0_f32;
         let mut sample_index = self.engine.sample_index();
-        for chunk in pcm.chunks(128) {
+        let chunk_size = self.engine.config().analysis.short_hop_size.clamp(1, 128);
+        for chunk in pcm.chunks(chunk_size) {
             let report = self.engine.push_mono(chunk);
             sample_index = report.sample_index;
-            if let Some(frame) = self.engine.latest_frame() {
-                beat_event |= frame.beat_event;
-                strongest_impact = strongest_impact.max(frame.impact);
+            if report.output_frames > 0 {
+                if let Some(frame) = self.engine.latest_frame() {
+                    beat_event |= frame.beat_event;
+                    strongest_impact = strongest_impact.max(frame.impact);
+                }
             }
         }
+
         let frame = self.engine.latest_frame()?.clone();
         self.engine
             .render_at(sample_index, &self.point, &mut self.color)
             .ok()?;
+
+        let nominal_dt = 1.0 / self.engine.config().render.frames_per_second.max(1.0);
+        let dt = self
+            .last_style_sample
+            .map(|previous| {
+                sample_index.saturating_sub(previous) as f32
+                    / self.engine.config().analysis.sample_rate.max(1) as f32
+            })
+            .filter(|value| *value > 0.0)
+            .unwrap_or(nominal_dt)
+            .clamp(1.0e-5, 0.250);
+        self.last_style_sample = Some(sample_index);
+        self.smoothed_style_loudness +=
+            smoothing_alpha(dt, 0.20) * (frame.loudness - self.smoothed_style_loudness);
+
+        // Integrating angular velocity avoids the large hue discontinuity caused
+        // by `absolute_time * loudness_dependent_speed` when loudness changes.
+        let aurora_speed = 0.025 + self.smoothed_style_loudness * 0.055;
+        self.style_phase = wrap01(self.style_phase + dt * aurora_speed);
+
         let mut color = self.color[0];
         apply_style(
             &mut color,
             settings.style,
-            frame.time_seconds as f32,
-            frame.loudness,
+            self.style_phase,
+            self.smoothed_style_loudness,
         );
         color = scale_color(color, settings.sensitivity);
+        color = smooth_styled_color(self.styled_color, color, dt);
+        self.styled_color = color;
+
         Some(LiveFrame {
             color,
             metrics: LiveMetrics {
@@ -197,6 +227,10 @@ impl LiveEngine {
     pub fn reset(&mut self) {
         self.engine.reset();
         self.color = [Rgba::default()];
+        self.styled_color = Rgba::default();
+        self.style_phase = 0.0;
+        self.smoothed_style_loudness = 0.0;
+        self.last_style_sample = None;
     }
 }
 
@@ -216,7 +250,25 @@ fn scale_color(mut color: Rgba, sensitivity: f32) -> Rgba {
     color
 }
 
-fn apply_style(color: &mut Rgba, style: LiveStyle, time: f32, loudness: f32) {
+fn smooth_styled_color(previous: Rgba, target: Rgba, dt: f32) -> Rgba {
+    let previous_luma = 0.2126 * previous.r + 0.7152 * previous.g + 0.0722 * previous.b;
+    let target_luma = 0.2126 * target.r + 0.7152 * target.g + 0.0722 * target.b;
+    let time_constant = if target_luma > previous_luma {
+        0.024
+    } else {
+        0.105
+    };
+    let alpha = smoothing_alpha(dt, time_constant);
+    Rgba::new(
+        previous.r + alpha * (target.r - previous.r),
+        previous.g + alpha * (target.g - previous.g),
+        previous.b + alpha * (target.b - previous.b),
+        target.a,
+    )
+    .clamped()
+}
+
+fn apply_style(color: &mut Rgba, style: LiveStyle, aurora_phase: f32, loudness: f32) {
     match style {
         LiveStyle::GemPulse => {
             let luminance = color.r.max(color.g).max(color.b);
@@ -227,7 +279,7 @@ fn apply_style(color: &mut Rgba, style: LiveStyle, time: f32, loudness: f32) {
         LiveStyle::Spectrum => {}
         LiveStyle::Aurora => {
             let (hue, saturation, value) = rgb_to_hsv(color.r, color.g, color.b);
-            let rotated = (hue + time * (0.025 + loudness * 0.08)).rem_euclid(1.0);
+            let rotated = wrap01(hue + aurora_phase);
             let (r, g, b) = hsv_to_rgb(rotated, saturation.max(0.72), value);
             color.r = r;
             color.g = g;

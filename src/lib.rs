@@ -25,11 +25,11 @@ pub mod streaming;
 pub mod types;
 pub mod wav;
 
-#[cfg(all(target_os = "android", feature = "android-jni"))]
-mod android_jni;
-
 #[cfg(feature = "ffi")]
 pub mod ffi;
+
+#[cfg(all(target_os = "android", feature = "android-jni"))]
+mod android_jni;
 
 pub use config::{AnalysisConfig, EngineConfig, OutputMode, RenderConfig};
 pub use director::{LightDirector, RenderContext, RenderError};

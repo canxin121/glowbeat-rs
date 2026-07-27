@@ -5,8 +5,8 @@
 //! `render()`, and reads flattened RGBA without per-frame Rust allocation.
 
 use glowbeat::{
-    AnalysisConfig, EngineConfig, FullTrackAnalyzer, LightPoint, LightingScore, RenderConfig, Rgba,
-    ScorePlayer, StreamingEngine,
+    AnalysisConfig, EngineConfig, FullTrackAnalyzer, LightPoint, LightingScore, RenderConfig,
+    Rgba, ScorePlayer, StreamingEngine,
 };
 use wasm_bindgen::prelude::*;
 
@@ -239,7 +239,9 @@ impl WasmLightingScore {
         let mut config = AnalysisConfig::default();
         config.sample_rate = sample_rate;
         config.channels = channels;
-        config.max_frequency_hz = config.max_frequency_hz.min(sample_rate as f32 * 0.5 - 1.0);
+        config.max_frequency_hz = config
+            .max_frequency_hz
+            .min(sample_rate as f32 * 0.5 - 1.0);
         let analyzer = FullTrackAnalyzer::new(config).map_err(js_error)?;
         let score = analyzer
             .analyze_pcm(samples, sample_rate, channels)
@@ -293,12 +295,19 @@ pub struct WasmScorePlayer {
 impl WasmScorePlayer {
     /// Creates a score player with a ring light layout.
     #[wasm_bindgen(constructor)]
-    pub fn new(score: &WasmLightingScore, light_count: usize) -> Result<WasmScorePlayer, JsValue> {
+    pub fn new(
+        score: &WasmLightingScore,
+        light_count: usize,
+    ) -> Result<WasmScorePlayer, JsValue> {
         if light_count == 0 {
             return Err(JsValue::from_str("light_count must be greater than zero"));
         }
-        let player = ScorePlayer::new(score.score.clone(), RenderConfig::default(), light_count)
-            .map_err(js_error)?;
+        let player = ScorePlayer::new(
+            score.score.clone(),
+            RenderConfig::default(),
+            light_count,
+        )
+        .map_err(js_error)?;
         Ok(Self {
             player,
             lights: LightPoint::ring(light_count),

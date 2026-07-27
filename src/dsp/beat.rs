@@ -107,6 +107,10 @@ impl BeatTracker {
         self.history_write = (self.history_write + 1) % self.history.len();
         self.history_count = (self.history_count + 1).min(self.history.len());
         self.beat_accumulator = self.beat_accumulator.max(drive);
+        if drive < 0.012 {
+            self.confidence *= (-self.dt / 3.0).exp();
+            self.downbeat_confidence *= (-self.dt / 4.0).exp();
+        }
 
         if self.frames_until_update == 0 {
             self.reestimate_tempo_and_phase();
@@ -123,7 +127,7 @@ impl BeatTracker {
             if self.confidence < 0.12 && drive > 0.45 {
                 self.phase = 0.0;
             } else if error.abs() < 0.34 {
-                let correction = error * (0.10 + 0.32 * drive.min(1.0));
+                let correction = (error * (0.10 + 0.32 * drive.min(1.0))).clamp(-0.075, 0.075);
                 self.phase = wrap01(self.phase - correction);
                 self.bpm =
                     (self.bpm * (1.0 - 0.010 * error * drive)).clamp(self.min_bpm, self.max_bpm);
@@ -134,18 +138,22 @@ impl BeatTracker {
         // That is not a new beat. Only accept a correction-induced wrap when the
         // oscillator was already near the end of the cycle and lands near zero.
         let correction_wrap = !free_running_wrap && previous_phase > 0.72 && self.phase < 0.28;
-        let beat_event = free_running_wrap || correction_wrap;
-        let mut downbeat_event = false;
-        if beat_event {
+        let oscillator_wrap = free_running_wrap || correction_wrap;
+        if oscillator_wrap {
             self.record_completed_beat();
             self.beat_index = self.beat_index.wrapping_add(1);
             self.beat_accumulator = drive;
             self.update_meter();
-            let beat_in_bar = self.current_beat_in_bar();
-            downbeat_event = beat_in_bar == 0;
         }
 
         let beat_in_bar = self.current_beat_in_bar();
+        // The oscillator may free-run while the stream is silent or before a
+        // tempo has locked. Keep its phase internally, but do not expose those
+        // speculative wraps as lighting events.
+        let beat_event = oscillator_wrap && (self.confidence > 0.22 || drive > 0.62);
+        let downbeat_event = beat_event
+            && beat_in_bar == 0
+            && (self.downbeat_confidence > 0.15 || self.confidence > 0.60);
         let bar_phase = (beat_in_bar as f32 + self.phase) / self.meter.max(1) as f32;
         BeatFrame {
             bpm: self.bpm,
@@ -230,8 +238,26 @@ impl BeatTracker {
         }
         let mean_score = score_sum / score_count.max(1) as f32;
         let separation = ((best_score - mean_score) / (best_score.abs() + 1.0e-6)).clamp(0.0, 1.0);
+        // Adjacent lags belong to the same broad autocorrelation peak. Compare
+        // against the best independent peak outside a small neighborhood so a
+        // wide but unambiguous tempo peak is not assigned artificially low confidence.
+        let exclusion = ((best_lag as f32 * 0.04).ceil() as usize).max(2);
+        let mut independent_second = f32::NEG_INFINITY;
+        for lag in minimum_lag..=maximum_lag {
+            if lag.abs_diff(best_lag) <= exclusion {
+                continue;
+            }
+            if let Some(&score) = self.scores.get(lag - minimum_lag) {
+                independent_second = independent_second.max(score);
+            }
+        }
+        let competing_score = if independent_second.is_finite() {
+            independent_second
+        } else {
+            second_score
+        };
         let peak_separation =
-            ((best_score - second_score.max(0.0)) / (best_score.abs() + 1.0e-6)).clamp(0.0, 1.0);
+            ((best_score - competing_score.max(0.0)) / (best_score.abs() + 1.0e-6)).clamp(0.0, 1.0);
         let activity = (mean * 8.0).clamp(0.0, 1.0);
         let new_confidence = (0.70 * separation + 0.30 * peak_separation) * activity;
         self.confidence = lerp(self.confidence, new_confidence, 0.30).clamp(0.0, 1.0);
@@ -262,7 +288,9 @@ impl BeatTracker {
             }
             let measured_phase = best_offset as f32 / best_lag as f32;
             let phase_error = wrap_signed_cycle(measured_phase - self.phase);
-            self.phase = wrap01(self.phase + phase_error * (0.08 + 0.35 * self.confidence));
+            let phase_correction =
+                (phase_error * (0.08 + 0.35 * self.confidence)).clamp(-0.090, 0.090);
+            self.phase = wrap01(self.phase + phase_correction);
         }
     }
 

@@ -502,20 +502,47 @@ impl ScorePlayer {
                 }
             }
         }
+        // Blend the first part of a section from the previous palette and
+        // intensity. Spatial motifs still switch on the musical boundary, while
+        // the perceptual color change is continuous instead of a one-frame cut.
+        let target_intensity = section_intensity(section);
+        let mut palette_hue = wrap01(section.palette_hue);
+        let mut intensity = target_intensity;
+        if let Some(previous) = section_index
+            .checked_sub(1)
+            .and_then(|index| self.score.sections.get(index))
+        {
+            let maximum_blend = u64::from(self.score.sample_rate) * 3 / 5;
+            let transition_samples = maximum_blend.min(section_duration / 4).max(1);
+            let transition_progress = (sample_index.saturating_sub(section.start_sample) as f64
+                / transition_samples as f64) as f32;
+            let blend = smoothstep(0.0, 1.0, transition_progress);
+            palette_hue = circular_lerp(previous.palette_hue, section.palette_hue, blend);
+            intensity = lerp(section_intensity(previous), target_intensity, blend);
+        }
+
         // A subtle section-long evolution prevents static repeated scenes while
         // keeping their palette and motif recognizable.
         let evolution = (progress - 0.5) * 0.028;
         RenderContext {
-            palette_hue: Some(wrap01(section.palette_hue)),
+            palette_hue: Some(palette_hue),
             palette_shift: evolution,
-            intensity: lerp(0.82, 1.14, section.intensity)
-                * lerp(0.94, 1.06, section.narrative_rank),
+            intensity,
             spatial_mode: Some(section.spatial_mode),
             motif_seed: section.motif_seed,
             anticipation,
             blackout,
         }
     }
+}
+
+fn section_intensity(section: &SectionCue) -> f32 {
+    lerp(0.82, 1.14, section.intensity) * lerp(0.94, 1.06, section.narrative_rank)
+}
+
+fn circular_lerp(start: f32, end: f32, amount: f32) -> f32 {
+    let difference = wrap01(end - start + 0.5) - 0.5;
+    wrap01(start + difference * amount.clamp(0.0, 1.0))
 }
 
 /// Score playback error.

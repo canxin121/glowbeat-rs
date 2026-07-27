@@ -5,7 +5,7 @@ use glowbeat::{
 fn test_song(sample_rate: u32, seconds: usize) -> Vec<f32> {
     let frames = sample_rate as usize * seconds;
     let mut output = vec![0.0_f32; frames];
-    for (frame, sample) in output.iter_mut().enumerate() {
+    for (frame, sample) in output.iter_mut().enumerate().take(frames) {
         let time = frame as f32 / sample_rate as f32;
         let section_gain = if time < seconds as f32 * 0.5 {
             0.35

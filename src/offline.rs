@@ -161,10 +161,10 @@ fn zero_phase_enhance(frames: &mut [MusicFrame], hop_seconds: f32) {
         let end = (index + chroma_radius + 1).min(frames.len());
         let mut average = [0.0_f32; NUM_CHROMA];
         let mut weight_sum = 0.0;
-        for (source, source_chroma) in original.iter().enumerate().take(end).skip(start) {
+        for (source, chroma) in original.iter().enumerate().take(end).skip(start) {
             let distance = index.abs_diff(source) as f32 / (chroma_radius + 1) as f32;
             let weight = (1.0 - distance).max(0.0);
-            for (destination, value) in average.iter_mut().zip(*source_chroma) {
+            for (destination, value) in average.iter_mut().zip(*chroma) {
                 *destination += weight * value;
             }
             weight_sum += weight;
@@ -384,7 +384,7 @@ fn add_future_context(frames: &mut [MusicFrame], dt: f32) {
     let onset_prefix = prefix_sum(&onset_density);
 
     let mut future_build = vec![0.0_f32; count];
-    for (index, destination) in future_build.iter_mut().enumerate() {
+    for (index, destination) in future_build.iter_mut().enumerate().take(count) {
         let past_start = index.saturating_sub(medium);
         let past = range_mean(&prefix, past_start, index + 1);
         let near_future = range_mean(&prefix, index, (index + short).min(count));
@@ -847,7 +847,7 @@ fn choose_spatial_mode(scene: SceneKind, repeat_group: u16, index: usize) -> Spa
         }
         SceneKind::Build => SpatialMode::Spiral,
         SceneKind::Drop => SpatialMode::Radial,
-        SceneKind::Transition => SpatialMode::Sparkle,
+        SceneKind::Transition => SpatialMode::Mirror,
     }
 }
 
@@ -859,9 +859,13 @@ fn snap_to_downbeat(frames: &[MusicFrame], target: usize, radius: usize) -> usiz
         if frame.downbeat_event || (frame.beat_event && frame.beat_in_bar == 0) {
             let distance = target.abs_diff(index);
             let confidence = frame.downbeat_confidence + frame.impact * 0.20;
-            if best.is_none_or(|current| {
-                distance < current.1 || (distance == current.1 && confidence > current.2)
-            }) {
+            let is_better = match best {
+                None => true,
+                Some(current) => {
+                    distance < current.1 || (distance == current.1 && confidence > current.2)
+                }
+            };
+            if is_better {
                 best = Some((index, distance, confidence));
             }
         }
@@ -879,10 +883,10 @@ fn centered_triangle_smooth(values: &[f32], radius: usize) -> Vec<f32> {
         let end = (index + radius + 1).min(values.len());
         let mut sum = 0.0;
         let mut weight_sum = 0.0;
-        for (source, &value) in values.iter().enumerate().take(end).skip(start) {
+        for (source, value) in values.iter().enumerate().take(end).skip(start) {
             let distance = index.abs_diff(source) as f32;
             let weight = (radius + 1) as f32 - distance;
-            sum += value * weight;
+            sum += *value * weight;
             weight_sum += weight;
         }
         *destination = sum / weight_sum.max(1.0e-9);

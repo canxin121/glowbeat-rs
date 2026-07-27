@@ -52,15 +52,17 @@ impl MusicObserver {
             ring: vec![0.0; ring_size],
             ring_write: 0,
             sample_index: 0,
-            short_spectrum: SpectrumAnalyzer::new(
+            short_spectrum: SpectrumAnalyzer::new_with_hop(
                 config.sample_rate,
                 config.short_fft_size,
+                config.short_hop_size,
                 config.min_frequency_hz,
                 config.max_frequency_hz,
             ),
-            long_spectrum: SpectrumAnalyzer::new(
+            long_spectrum: SpectrumAnalyzer::new_with_hop(
                 config.sample_rate,
                 config.long_fft_size,
+                config.long_hop_size,
                 config.min_frequency_hz,
                 config.max_frequency_hz,
             ),
@@ -160,11 +162,11 @@ impl MusicObserver {
             .short_spectrum
             .analyze_ring(&self.ring, self.ring_write);
         let onset = self.onset.update(&spectrum.bands);
-        let onset_drive = (0.62 * onset.low
-            + 0.44 * onset.mid
-            + 0.22 * onset.high
-            + 0.72 * onset.impact
-            + 0.24 * onset.flux)
+        let onset_drive = (0.60 * onset.low
+            + 0.42 * onset.mid
+            + 0.08 * onset.high
+            + 0.48 * onset.impact
+            + 0.18 * onset.flux)
             .clamp(0.0, 1.5);
         let beat = self.beat.update(onset_drive);
         let scene = self.scene.update(

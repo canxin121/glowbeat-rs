@@ -9,7 +9,9 @@
 //!   anticipatory and narrative overrides.
 
 use crate::config::{OutputMode, RenderConfig};
-use crate::math::{gamma_encode, hash_unit, lerp, oklch_to_linear_srgb, smoothstep, wrap01};
+use crate::math::{
+    gamma_encode, hash_unit, lerp, oklch_to_linear_srgb, smoothing_alpha, smoothstep, wrap01,
+};
 use crate::types::{LightPoint, MusicFrame, Rgba, SceneKind, SpatialMode, NUM_CHROMA};
 
 /// Optional high-level direction supplied by the full-track score player.
@@ -92,13 +94,14 @@ struct PulseBank {
 impl PulseBank {
     fn ingest(&mut self, frame: &MusicFrame, sample_rate: u32) {
         self.low
-            .ingest(frame.sample_index, frame.onset_low, sample_rate, 0.215);
+            .ingest(frame.sample_index, frame.onset_low, sample_rate, 0.260);
         self.mid
-            .ingest(frame.sample_index, frame.onset_mid, sample_rate, 0.115);
+            .ingest(frame.sample_index, frame.onset_mid, sample_rate, 0.155);
         self.high
-            .ingest(frame.sample_index, frame.onset_high, sample_rate, 0.070);
-        let downbeat = if frame.downbeat_event {
-            0.32 + 0.38 * frame.downbeat_confidence
+            .ingest(frame.sample_index, frame.onset_high, sample_rate, 0.115);
+        let downbeat_evidence = frame.beat_confidence * frame.downbeat_confidence;
+        let downbeat = if frame.downbeat_event && downbeat_evidence > 0.18 {
+            0.12 + 0.38 * downbeat_evidence
         } else {
             0.0
         };
@@ -106,19 +109,19 @@ impl PulseBank {
             frame.sample_index,
             frame.impact.max(downbeat),
             sample_rate,
-            0.145,
+            0.190,
         );
         self.drop
-            .ingest(frame.sample_index, frame.drop, sample_rate, 0.480);
+            .ingest(frame.sample_index, frame.drop, sample_rate, 0.560);
     }
 
     fn values_at(&self, sample_index: u64, sample_rate: u32) -> PulseValues {
         PulseValues {
-            low: self.low.value_at(sample_index, sample_rate, 0.215),
-            mid: self.mid.value_at(sample_index, sample_rate, 0.115),
-            high: self.high.value_at(sample_index, sample_rate, 0.070),
-            impact: self.impact.value_at(sample_index, sample_rate, 0.145),
-            drop: self.drop.value_at(sample_index, sample_rate, 0.480),
+            low: self.low.value_at(sample_index, sample_rate, 0.260),
+            mid: self.mid.value_at(sample_index, sample_rate, 0.155),
+            high: self.high.value_at(sample_index, sample_rate, 0.115),
+            impact: self.impact.value_at(sample_index, sample_rate, 0.190),
+            drop: self.drop.value_at(sample_index, sample_rate, 0.560),
         }
     }
 }
@@ -133,9 +136,12 @@ pub struct LightDirector {
     sample_rate: u32,
     latest: MusicFrame,
     palette_hue: f32,
+    render_hue: f32,
     palette_confidence: f32,
     pulses: PulseBank,
-    previous_linear: Vec<[f32; 4]>,
+    previous_output: Vec<[f32; 4]>,
+    last_ingest_sample: Option<u64>,
+    last_render_sample: Option<u64>,
 }
 
 impl LightDirector {
@@ -146,14 +152,18 @@ impl LightDirector {
         light_capacity: usize,
     ) -> Result<Self, crate::config::ConfigError> {
         config.validate()?;
+        let initial_output = initial_output_state(config.output_mode);
         Ok(Self {
             config,
             sample_rate: sample_rate.max(1),
             latest: MusicFrame::default(),
             palette_hue: 0.72,
+            render_hue: 0.72,
             palette_confidence: 0.0,
             pulses: PulseBank::default(),
-            previous_linear: vec![[0.0; 4]; light_capacity],
+            previous_output: vec![initial_output; light_capacity],
+            last_ingest_sample: None,
+            last_render_sample: None,
         })
     }
 
@@ -166,40 +176,89 @@ impl LightDirector {
     /// Number of lights with preallocated temporal state.
     #[must_use]
     pub fn light_capacity(&self) -> usize {
-        self.previous_linear.len()
+        self.previous_output.len()
     }
 
     /// Ensures temporal state exists for at least `capacity` lights.
     ///
     /// Existing light history is retained. New lights begin from black.
     pub fn reserve_lights(&mut self, capacity: usize) {
-        if capacity > self.previous_linear.len() {
-            self.previous_linear.resize(capacity, [0.0; 4]);
+        if capacity > self.previous_output.len() {
+            self.previous_output
+                .resize(capacity, initial_output_state(self.config.output_mode));
         }
     }
 
     /// Clears palette, pulse, and smoothing history while retaining capacity.
     pub fn reset(&mut self) {
-        let capacity = self.previous_linear.len();
+        let capacity = self.previous_output.len();
         *self = Self::new(self.config.clone(), self.sample_rate, capacity)
             .expect("existing renderer configuration remains valid");
     }
 
     /// Ingests an analysis frame and updates persistent palette/event state.
     pub fn ingest_frame(&mut self, frame: &MusicFrame) {
+        let first_frame = self.last_ingest_sample.is_none();
+        let dt = self
+            .last_ingest_sample
+            .map(|previous| {
+                frame.sample_index.saturating_sub(previous) as f32 / self.sample_rate as f32
+            })
+            .unwrap_or(1.0 / self.config.frames_per_second.max(1.0))
+            .clamp(1.0e-5, 0.25);
+        self.last_ingest_sample = Some(frame.sample_index);
+
+        // Event pulses consume unsmoothed detector output so their latency stays
+        // low. Continuous visual controls below use time-based smoothing.
         self.pulses.ingest(frame, self.sample_rate);
         let (hue, concentration) = harmonic_hue(&frame.chroma);
         let confidence = (frame.tonal_confidence * concentration).clamp(0.0, 1.0);
-        if confidence > 0.035 {
-            let difference = signed_hue_difference(hue, self.palette_hue);
-            // Harmony should move slowly enough to feel intentional, but become
-            // more responsive at confident structural boundaries.
-            let boundary_boost = 1.0 + 1.6 * frame.novelty;
-            let alpha = (0.018 + 0.095 * confidence) * boundary_boost;
-            self.palette_hue = wrap01(self.palette_hue + difference * alpha.min(0.35));
+        if first_frame {
+            if confidence > 0.12 {
+                self.palette_hue = hue;
+                self.render_hue = hue;
+            }
+            self.palette_confidence = confidence;
+            self.latest = frame.clone();
+            return;
         }
-        self.palette_confidence += 0.08 * (confidence - self.palette_confidence);
-        self.latest = frame.clone();
+
+        if confidence > 0.08 {
+            let difference = signed_hue_difference(hue, self.palette_hue);
+            // Stable harmony normally moves over roughly a second. A real
+            // structural boundary may accelerate the transition, but never turn
+            // a noisy chroma frame into an instantaneous color jump.
+            let boundary = smoothstep(0.30, 0.85, frame.novelty);
+            let time_constant = lerp(1.20, 0.42, boundary);
+            let alpha = smoothing_alpha(dt, time_constant) * smoothstep(0.08, 0.55, confidence);
+            self.palette_hue = wrap01(self.palette_hue + difference * alpha);
+        }
+        self.palette_confidence +=
+            smoothing_alpha(dt, 0.65) * (confidence - self.palette_confidence);
+
+        let previous = &self.latest;
+        let mut smoothed = frame.clone();
+        smoothed.loudness = asymmetric_smooth(previous.loudness, frame.loudness, dt, 0.040, 0.220);
+        smoothed.spectral_centroid = asymmetric_smooth(
+            previous.spectral_centroid,
+            frame.spectral_centroid,
+            dt,
+            0.090,
+            0.260,
+        );
+        smoothed.energy_trend =
+            asymmetric_smooth(previous.energy_trend, frame.energy_trend, dt, 0.120, 0.360);
+        smoothed.buildup = asymmetric_smooth(previous.buildup, frame.buildup, dt, 0.180, 0.520);
+        smoothed.novelty = asymmetric_smooth(previous.novelty, frame.novelty, dt, 0.080, 0.380);
+        smoothed.flux = asymmetric_smooth(previous.flux, frame.flux, dt, 0.018, 0.100);
+        smoothed.onset_low =
+            asymmetric_smooth(previous.onset_low, frame.onset_low, dt, 0.010, 0.150);
+        smoothed.onset_mid =
+            asymmetric_smooth(previous.onset_mid, frame.onset_mid, dt, 0.010, 0.120);
+        smoothed.onset_high =
+            asymmetric_smooth(previous.onset_high, frame.onset_high, dt, 0.008, 0.095);
+        smoothed.impact = asymmetric_smooth(previous.impact, frame.impact, dt, 0.008, 0.160);
+        self.latest = smoothed;
     }
 
     /// Renders the latest music state into `output` at an absolute audio sample.
@@ -223,19 +282,49 @@ impl LightDirector {
         if lights.len() != output.len() {
             return Err(RenderError::LengthMismatch);
         }
-        if lights.len() > self.previous_linear.len() {
+        if lights.len() > self.previous_output.len() {
             return Err(RenderError::CapacityExceeded {
                 requested: lights.len(),
-                capacity: self.previous_linear.len(),
+                capacity: self.previous_output.len(),
             });
         }
 
+        let nominal_dt = 1.0 / self.config.frames_per_second.max(1.0);
+        let render_dt = self
+            .last_render_sample
+            .map(|previous| sample_index.saturating_sub(previous) as f32 / self.sample_rate as f32)
+            .filter(|value| *value > 0.0)
+            .unwrap_or(nominal_dt)
+            .clamp(nominal_dt * 0.20, 0.25);
+        self.last_render_sample = Some(sample_index);
+        // Strength profiles are defined against a 120 Hz reference so the
+        // perceived transition time remains similar at 60, 100, or 120 FPS.
+        let reference_dt = 1.0 / 120.0;
+        let frame_scale = (render_dt / reference_dt).clamp(0.05, 30.0);
+        let output_step = if self.config.max_luma_step >= 1.0 {
+            1.0
+        } else {
+            (self.config.max_luma_step * frame_scale).clamp(0.0, 0.20)
+        };
+
         let pulses = self.pulses.values_at(sample_index, self.sample_rate);
+        let target_hue = wrap01(
+            context.palette_hue.unwrap_or(self.palette_hue)
+                + context.palette_shift
+                + self.config.hue_offset,
+        );
+        let hue_difference = signed_hue_difference(target_hue, self.render_hue);
+        let hue_time_constant = if context.blackout > 0.35 { 0.24 } else { 0.48 };
+        self.render_hue = wrap01(
+            self.render_hue + hue_difference * smoothing_alpha(render_dt, hue_time_constant),
+        );
+        let hue = self.render_hue;
 
         // `latest` is initialized to a valid silent frame, so the same path
         // safely handles rendering before the first analysis hop.
         let frame = &self.latest;
-        let elapsed = (sample_index as f64 - frame.sample_index as f64) / self.sample_rate as f64;
+        let elapsed =
+            sample_index.saturating_sub(frame.sample_index) as f64 / self.sample_rate as f64;
         let elapsed = elapsed as f32;
         let beat_phase = wrap01(frame.beat_phase + elapsed * frame.bpm.max(1.0) / 60.0);
         let beats_elapsed = elapsed * frame.bpm.max(1.0) / 60.0;
@@ -246,8 +335,6 @@ impl LightDirector {
             frame.bar_phase + elapsed * frame.bpm.max(1.0) / (60.0 * frame.meter.max(1) as f32),
         );
 
-        let context_hue = context.palette_hue.unwrap_or(self.palette_hue);
-        let hue = wrap01(context_hue + context.palette_shift + self.config.hue_offset);
         let scene = frame.scene;
         let mode = context
             .spatial_mode
@@ -277,18 +364,39 @@ impl LightDirector {
             wrap01(hue + 0.065),
         );
 
-        let beat_shape = beat_envelope(beat_phase, frame.beat_confidence);
-        let offbeat = beat_envelope(wrap01(beat_phase + 0.5), frame.beat_confidence) * 0.42;
-        let bar_accent = if beat_in_bar == 0 { 1.0 } else { 0.40 };
-        let groove =
-            (beat_shape * (0.60 + 0.40 * bar_accent) + offbeat) * self.config.beat_strength;
+        let beat_confidence = frame.beat_confidence.clamp(0.0, 1.0);
+        let beat_gate = smoothstep(0.18, 0.56, beat_confidence);
+        let beat_shape = beat_envelope(beat_phase, beat_confidence) * beat_gate;
+        // Above roughly 150 BPM, professional lighting commonly reads the groove
+        // in half-time. Keep every detected beat for phase continuity, but make
+        // alternating beats intentionally subordinate in even meters.
+        let half_time = if frame.meter % 2 == 0 {
+            smoothstep(148.0, 180.0, frame.bpm)
+        } else {
+            0.0
+        };
+        let beat_role = if beat_in_bar % 2 == 0 {
+            1.0
+        } else {
+            lerp(1.0, 0.20, half_time)
+        };
+        // The old renderer emitted a strong half-beat pulse even before the
+        // tempo had locked. Keep only a subtle offbeat texture at high confidence,
+        // and remove it as the main tempo becomes visually dense.
+        let offbeat = beat_envelope(wrap01(beat_phase + 0.5), beat_confidence)
+            * 0.10
+            * smoothstep(0.58, 0.90, beat_confidence)
+            * (1.0 - 0.86 * half_time);
+        let bar_accent = if beat_in_bar == 0 { 1.0 } else { 0.42 };
+        let groove = (beat_shape * beat_role * (0.64 + 0.36 * bar_accent) + offbeat)
+            * self.config.beat_strength;
         let anticipation = context.anticipation.clamp(0.0, 1.0);
         let blackout = context.blackout.clamp(0.0, 1.0);
         let global_level = (scene_params.base_level
-            + 0.34 * frame.loudness
-            + 0.14 * groove
-            + 0.09 * frame.energy_trend.max(0.0)
-            + 0.10 * anticipation)
+            + 0.31 * frame.loudness
+            + 0.10 * groove
+            + 0.07 * frame.energy_trend.max(0.0)
+            + 0.08 * anticipation)
             * context.intensity.max(0.0)
             * (1.0 - blackout);
 
@@ -296,7 +404,9 @@ impl LightDirector {
         // stable on long recordings after f32 can no longer represent every
         // individual sample index.
         let elapsed_time = sample_index as f64 / self.sample_rate as f64;
-        let sparkle_bucket = (elapsed_time * 18.0).floor() as u32;
+        let sparkle_position = elapsed_time * 5.0;
+        let sparkle_bucket = sparkle_position.floor() as u32;
+        let sparkle_phase = sparkle_position.fract() as f32;
         for (index, (point, destination)) in lights.iter().zip(output.iter_mut()).enumerate() {
             let field = spatial_field(
                 mode,
@@ -307,6 +417,7 @@ impl LightDirector {
                 frame,
                 context.motif_seed,
                 sparkle_bucket,
+                sparkle_phase,
             );
             let spatial_mix = lerp(1.0, field, self.config.spatial_strength.clamp(0.0, 1.0));
 
@@ -314,7 +425,7 @@ impl LightDirector {
             add_scaled_rgb(
                 &mut rgb,
                 secondary_rgb,
-                (0.07 + 0.19 * groove) * (1.0 - 0.45 * anticipation) * spatial_mix,
+                (0.07 + 0.14 * groove) * (1.0 - 0.45 * anticipation) * spatial_mix,
             );
 
             let low_layer = pulses.low
@@ -323,23 +434,35 @@ impl LightDirector {
             let mid_layer = pulses.mid
                 * self.config.accent_strength
                 * (0.62 + 0.38 * mirror_spatial(point, bar_phase));
-            let high_random = hash_unit(point.id ^ sparkle_bucket.wrapping_mul(0x9e37_79b9));
-            let high_gate = smoothstep(0.62, 0.98, high_random + pulses.high * 0.65);
+            let high_random = temporal_hash(
+                point.id ^ 0x9e37_79b9,
+                sparkle_bucket,
+                sparkle_phase,
+                0x7f4a_7c15,
+            );
+            let random_gate = smoothstep(0.66, 0.98, high_random + pulses.high * 0.42);
+            // A single physical stick must not randomly disappear. Spatial
+            // randomness is gradually introduced only when a layout asks for it.
+            let high_gate = lerp(
+                1.0,
+                random_gate,
+                self.config.spatial_strength.clamp(0.0, 1.0),
+            );
             let high_layer = pulses.high
                 * self.config.accent_strength
                 * high_gate
-                * (0.42 + 0.58 * frame.spectral_centroid);
+                * (0.38 + 0.46 * frame.spectral_centroid);
             let impact_layer =
                 pulses.impact * self.config.accent_strength * (0.60 + 0.40 * spatial_mix);
             let drop_layer = pulses.drop
                 * self.config.accent_strength
                 * radial_release(point, pulses.drop, beat_phase);
 
-            add_scaled_rgb(&mut rgb, accent_rgb, 0.34 * low_layer);
-            add_scaled_rgb(&mut rgb, high_rgb, 0.52 * mid_layer);
-            add_scaled_rgb(&mut rgb, high_rgb, 0.32 * high_layer);
-            add_scaled_rgb(&mut rgb, accent_rgb, 0.45 * impact_layer);
-            add_scaled_rgb(&mut rgb, high_rgb, 0.72 * drop_layer);
+            add_scaled_rgb(&mut rgb, accent_rgb, 0.30 * low_layer);
+            add_scaled_rgb(&mut rgb, high_rgb, 0.36 * mid_layer);
+            add_scaled_rgb(&mut rgb, high_rgb, 0.18 * high_layer);
+            add_scaled_rgb(&mut rgb, accent_rgb, 0.34 * impact_layer);
+            add_scaled_rgb(&mut rgb, high_rgb, 0.56 * drop_layer);
 
             // A buildup becomes visually denser and more focused without
             // committing to an unconfirmed future event.
@@ -361,24 +484,39 @@ impl LightDirector {
                 *channel = (*channel * self.config.max_brightness).clamp(0.0, 1.0);
             }
 
-            let mut rgba_linear = match self.config.output_mode {
-                OutputMode::Alpha => [rgb[0], rgb[1], rgb[2], 1.0],
-                OutputMode::Amber => rgb_to_rgba_amber(rgb, self.config.amber_mix),
+            // Mix effects in linear light, then apply the output transfer once.
+            // Temporal limiting intentionally happens in the transmitted/output
+            // domain so a small near-black linear value cannot become a large
+            // one-frame jump after gamma encoding.
+            let mut rgba_output = match self.config.output_mode {
+                OutputMode::Alpha => [
+                    gamma_encode(rgb[0], self.config.output_gamma),
+                    gamma_encode(rgb[1], self.config.output_gamma),
+                    gamma_encode(rgb[2], self.config.output_gamma),
+                    1.0,
+                ],
+                OutputMode::Amber => {
+                    let rgba_linear = rgb_to_rgba_amber(rgb, self.config.amber_mix);
+                    [
+                        gamma_encode(rgba_linear[0], self.config.output_gamma),
+                        gamma_encode(rgba_linear[1], self.config.output_gamma),
+                        gamma_encode(rgba_linear[2], self.config.output_gamma),
+                        gamma_encode(rgba_linear[3], self.config.output_gamma),
+                    ]
+                }
             };
-            limit_luminance_step(
-                &mut rgba_linear,
-                &self.previous_linear[index],
-                self.config.max_luma_step,
+            limit_output_step(
+                &mut rgba_output,
+                &self.previous_output[index],
+                output_step,
+                self.config.output_mode == OutputMode::Amber,
             );
-            self.previous_linear[index] = rgba_linear;
+            self.previous_output[index] = rgba_output;
             *destination = Rgba::new(
-                gamma_encode(rgba_linear[0], self.config.output_gamma),
-                gamma_encode(rgba_linear[1], self.config.output_gamma),
-                gamma_encode(rgba_linear[2], self.config.output_gamma),
-                match self.config.output_mode {
-                    OutputMode::Alpha => rgba_linear[3],
-                    OutputMode::Amber => gamma_encode(rgba_linear[3], self.config.output_gamma),
-                },
+                rgba_output[0],
+                rgba_output[1],
+                rgba_output[2],
+                rgba_output[3],
             )
             .clamped();
         }
@@ -493,7 +631,7 @@ fn default_spatial_mode(scene: SceneKind) -> SpatialMode {
         SceneKind::Intense => SpatialMode::Zones,
         SceneKind::Build => SpatialMode::Spiral,
         SceneKind::Drop => SpatialMode::Radial,
-        SceneKind::Transition => SpatialMode::Sparkle,
+        SceneKind::Transition => SpatialMode::Mirror,
     }
 }
 
@@ -528,14 +666,15 @@ fn signed_hue_difference(target: f32, current: f32) -> f32 {
 }
 
 fn beat_envelope(phase: f32, confidence: f32) -> f32 {
-    let attack = smoothstep(0.0, 0.035, phase);
-    let decay = (-phase / lerp(0.24, 0.115, confidence.clamp(0.0, 1.0))).exp();
-    let pulse = if phase < 0.035 {
-        attack.max(decay)
+    let decay = (-phase / lerp(0.28, 0.17, confidence.clamp(0.0, 1.0))).exp();
+    // A very short rounded attack avoids a mathematical discontinuity while
+    // keeping the perceived beat close to the audio event.
+    let rounded_attack = smoothstep(0.0, 0.018, phase);
+    if phase < 0.018 {
+        decay.max(rounded_attack)
     } else {
         decay
-    };
-    pulse * lerp(0.32, 1.0, confidence.clamp(0.0, 1.0))
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -548,6 +687,7 @@ fn spatial_field(
     frame: &MusicFrame,
     seed: u32,
     sparkle_bucket: u32,
+    sparkle_phase: f32,
 ) -> f32 {
     let tau = core::f32::consts::TAU;
     match mode {
@@ -583,9 +723,9 @@ fn spatial_field(
             0.38 + 0.62 * (0.5 + 0.5 * phase.cos())
         }
         SpatialMode::Sparkle => {
-            let random = hash_unit(point.id ^ seed ^ sparkle_bucket.wrapping_mul(0x85eb_ca6b));
-            let gate = smoothstep(0.89, 0.995, random + frame.onset_high * 0.28);
-            0.28 + 0.72 * gate
+            let random = temporal_hash(point.id ^ seed, sparkle_bucket, sparkle_phase, 0x85eb_ca6b);
+            let gate = smoothstep(0.84, 0.985, random + frame.onset_high * 0.18);
+            0.52 + 0.48 * gate
         }
     }
 }
@@ -631,22 +771,79 @@ fn rgb_to_rgba_amber(rgb: [f32; 3], amber_mix: f32) -> [f32; 4] {
     ]
 }
 
-fn limit_luminance_step(current: &mut [f32; 4], previous: &[f32; 4], max_step: f32) {
+fn initial_output_state(mode: OutputMode) -> [f32; 4] {
+    match mode {
+        OutputMode::Alpha => [0.0, 0.0, 0.0, 1.0],
+        OutputMode::Amber => [0.0; 4],
+    }
+}
+
+fn asymmetric_smooth(
+    previous: f32,
+    target: f32,
+    dt: f32,
+    attack_seconds: f32,
+    release_seconds: f32,
+) -> f32 {
+    let time_constant = if target > previous {
+        attack_seconds
+    } else {
+        release_seconds
+    };
+    previous + smoothing_alpha(dt, time_constant) * (target - previous)
+}
+
+fn temporal_hash(seed: u32, bucket: u32, phase: f32, multiplier: u32) -> f32 {
+    let current = hash_unit(seed ^ bucket.wrapping_mul(multiplier));
+    let next = hash_unit(seed ^ bucket.wrapping_add(1).wrapping_mul(multiplier));
+    lerp(current, next, smoothstep(0.0, 1.0, phase))
+}
+
+fn limit_output_step(
+    current: &mut [f32; 4],
+    previous: &[f32; 4],
+    max_step: f32,
+    physical_fourth_channel: bool,
+) {
     if max_step >= 1.0 {
         return;
     }
+
     let current_luma = 0.2126 * current[0] + 0.7152 * current[1] + 0.0722 * current[2];
     let previous_luma = 0.2126 * previous[0] + 0.7152 * previous[1] + 0.0722 * previous[2];
-    let difference = current_luma - previous_luma;
-    if difference.abs() <= max_step || current_luma <= 1.0e-8 {
-        return;
+    let luma_difference = current_luma - previous_luma;
+    let luma_limit = if luma_difference >= 0.0 {
+        max_step * 1.55
+    } else {
+        max_step * 0.72
+    };
+
+    let mut blend: f32 = 1.0;
+    if luma_difference.abs() > luma_limit.max(1.0e-8) {
+        blend = blend.min(luma_limit / luma_difference.abs());
     }
-    let target_luma = previous_luma + difference.signum() * max_step;
-    let gain = (target_luma / current_luma).clamp(0.0, 1.0);
-    current[0] *= gain;
-    current[1] *= gain;
-    current[2] *= gain;
-    current[3] = lerp(previous[3], current[3], gain);
+
+    // Equal-luminance red/blue switches are still perceived as abrupt. Limit
+    // the largest physical channel delta in addition to total luminance.
+    let channels = if physical_fourth_channel { 4 } else { 3 };
+    let mut largest_channel_delta = 0.0_f32;
+    for channel in 0..channels {
+        largest_channel_delta =
+            largest_channel_delta.max((current[channel] - previous[channel]).abs());
+    }
+    let color_limit = (max_step * 1.35 + 0.0015).min(0.95);
+    if largest_channel_delta > color_limit.max(1.0e-8) {
+        blend = blend.min(color_limit / largest_channel_delta);
+    }
+
+    if blend < 1.0 {
+        for channel in 0..channels {
+            current[channel] = lerp(previous[channel], current[channel], blend);
+        }
+    }
+    if !physical_fourth_channel {
+        current[3] = 1.0;
+    }
 }
 
 #[cfg(test)]
@@ -656,18 +853,16 @@ mod tests {
     #[test]
     fn render_is_finite_and_bounded() {
         let mut director = LightDirector::new(RenderConfig::default(), 48_000, 64).unwrap();
-        let mut chroma = [0.0; NUM_CHROMA];
-        chroma[0] = 0.7;
-        chroma[7] = 0.3;
-        let frame = MusicFrame {
+        let mut frame = MusicFrame {
             scene: SceneKind::Drop,
             loudness: 0.8,
             drop: 1.0,
             impact: 1.0,
-            chroma,
-            tonal_confidence: 0.9,
             ..MusicFrame::default()
         };
+        frame.chroma[0] = 0.7;
+        frame.chroma[7] = 0.3;
+        frame.tonal_confidence = 0.9;
         director.ingest_frame(&frame);
         let points = LightPoint::ring(64);
         let mut output = vec![Rgba::default(); 64];
@@ -678,6 +873,24 @@ mod tests {
                 .iter()
                 .all(|channel| (0.0..=1.0).contains(channel))
         }));
+    }
+
+    #[test]
+    fn output_limiter_bounds_luminance_and_color_steps() {
+        let previous = [0.10, 0.28, 0.42, 1.0];
+        let mut current = [0.92, 0.02, 0.84, 1.0];
+        let max_step = 0.055;
+        limit_output_step(&mut current, &previous, max_step, false);
+
+        let luma = |color: &[f32; 4]| 0.2126 * color[0] + 0.7152 * color[1] + 0.0722 * color[2];
+        let luma_limit = max_step * 1.55 + 1.0e-6;
+        assert!((luma(&current) - luma(&previous)).abs() <= luma_limit);
+        let color_limit = max_step * 1.35 + 0.0015 + 1.0e-6;
+        assert!(current[..3]
+            .iter()
+            .zip(&previous[..3])
+            .all(|(next, prior)| (*next - *prior).abs() <= color_limit));
+        assert_eq!(current[3], 1.0);
     }
 
     #[test]

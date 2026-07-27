@@ -1,4 +1,4 @@
-//! Allocation-stable JNI bridge for Android's live microphone and playback capture paths.
+//! Allocation-stable JNI bridge for Android live microphone and playback capture.
 
 use std::sync::Mutex;
 
@@ -22,8 +22,8 @@ impl AndroidRealtimeEngine {
         let engine = LiveEngine::new_mono(sample_rate).ok()?;
         Some(Self {
             engine,
-            pcm_i16: Vec::new(),
-            pcm_f32: Vec::new(),
+            pcm_i16: Vec::with_capacity(32_768),
+            pcm_f32: Vec::with_capacity(32_768),
             result: [0.0; RESULT_LENGTH],
         })
     }
@@ -50,7 +50,7 @@ impl AndroidRealtimeEngine {
             frame.metrics.high,
             frame.metrics.spectral_flux,
             frame.metrics.impact,
-            f32::from(frame.metrics.beat_event),
+            if frame.metrics.beat_event { 1.0 } else { 0.0 },
             frame.metrics.bpm,
             frame.metrics.beat_confidence,
             frame.metrics.musical_event,
