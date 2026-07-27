@@ -140,7 +140,7 @@ jobs:
       - uses: actions/checkout@v4
       - name: Type-check Swift wrapper
         run: swiftc -typecheck -Xcc -fmodule-map-file=bindings/swift/module.modulemap bindings/swift/GlowBeat.swift
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: '8.0.x'
       - name: Build C# wrapper
