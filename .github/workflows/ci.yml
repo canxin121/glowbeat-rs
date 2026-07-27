@@ -172,7 +172,7 @@ jobs:
         env:
           GLOWBEAT_MIN_REALTIME_FACTOR: '1.25'
         run: cargo bench --bench realtime | tee benchmark.txt
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: realtime-benchmark-${{ github.sha }}
           path: benchmark.txt
