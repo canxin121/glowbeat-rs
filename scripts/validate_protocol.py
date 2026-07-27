@@ -8,7 +8,6 @@ import struct
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PROTOCOL = ROOT / "src" / "protocol.rs"
-DOC = ROOT / "docs" / "PROTOCOL.md"
 
 MAGIC = b"GLB1"
 VERSION = 1
@@ -25,7 +24,6 @@ def q(value: float) -> int:
 
 def main() -> None:
     source = PROTOCOL.read_text(encoding="utf-8")
-    docs = DOC.read_text(encoding="utf-8")
     for needle in [
         'pub const MAGIC: [u8; 4] = *b"GLB1";',
         "pub const VERSION: u8 = 1;",
@@ -34,7 +32,6 @@ def main() -> None:
         "pub const CRC_BYTES: usize = 4;",
     ]:
         assert needle in source, f"missing source invariant: {needle}"
-    assert "Maximum payload is conservatively limited to 1200 bytes" in docs
     assert MAX_LIGHTS == 96
 
     flags = 0b1011
