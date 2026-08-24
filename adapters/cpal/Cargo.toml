@@ -19,7 +19,7 @@ path = "src/bin/glowbeat-native.rs"
 [dependencies]
 glowbeat = { path = "../..", default-features = false }
 cpal = "0.18.1"
-rtrb = "0.3.4"
+rtrb = "0.4.0"
 
 [profile.release]
 opt-level = 3
